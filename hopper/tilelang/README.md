@@ -32,3 +32,8 @@ sync pass (`ThreadSync("shared")`) can't see that the mbarriers already order pr
 
 gives the pipelined 516 TFLOP/s kernel. Once the pass is off, every other sync is yours: use named barriers
 (`T.sync_threads(barrier_id, arrive_count)`) inside a `T.ws` branch, never a full-block `__syncthreads()`.
+
+## FP8 block-scaled GEMM
+
+[`fp8/`](fp8/) has the DeepSeek-V3-style fp8 GEMM (1×128 activation scales, 128×128 weight scales): problem spec,
+harness, and the first kernel (890 TFLOP/s, accuracy check not passing yet). See [`fp8/README.md`](fp8/README.md).
