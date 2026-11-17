@@ -36,4 +36,4 @@ gives the pipelined 516 TFLOP/s kernel. Once the pass is off, every other sync i
 ## FP8 block-scaled GEMM
 
 [`fp8/`](fp8/) has the DeepSeek-V3-style fp8 GEMM (1×128 activation scales, 128×128 weight scales): problem spec,
-harness, and two kernels (best: 931 TFLOP/s with promotion overlapped; accuracy check not passing yet). See [`fp8/README.md`](fp8/README.md).
+harness, and the kernels (best: ~1060 TFLOP/s, persistent with register-prefetched scales; accuracy check not passing yet). See [`fp8/README.md`](fp8/README.md).

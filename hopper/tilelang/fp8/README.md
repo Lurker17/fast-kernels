@@ -13,6 +13,8 @@ A (activations) has one fp32 scale per row per 128 of K (`SA[M, K/128]`), B (wei
 | `gemm_ws_tma_async.py` | kernel 1: the bf16 pipeline (`../gemm_ws_tma_async.py`) ported to fp8 with per-group promotion |
 | `gemm_ws_tma_async_2part.py` | kernel 2: two partial accumulators per consumer, promotion overlapped with the next group's wgmmas |
 | `ab_stages_2part.py` | same-run A/B of kernels 1 and 2 at 4 and 5 stages |
+| `gemm_ws_mcast.py` | kernel 2 + 2-CTA clusters with TMA multicast of A, non-persistent (slower) |
+| `gemm_ws_persistent.py` | kernel 3 (current best): persistent, register prefetch of the scales, 4 stages; `mode` knob for cluster/multicast |
 
 ```
 python harness.py                      # correctness + benchmark of gemm_ws_tma_async
@@ -72,3 +74,33 @@ queued, `DEPBAR.LE gsb0, 0x1`, promotion FFMAs). Chunks of 2, 4 and 8 groups run
 The overlap is worth ~4% of kernel time at equal stages: the second consumer warpgroup was already covering most of
 the promotion gap. The interleaved bench moved ~6% between runs for the same config, so use ncu time for small
 differences. Output is bitwise identical to kernel 1, so the accuracy status above is unchanged.
+
+## Kernel 3: `gemm_ws_persistent.py` (current best, ~1060 TFLOP/s)
+
+Each row is one change; both numbers are from the same run (interleaved bench, TFLOP/s). Runs differ by up to ±6%
+on unlocked clocks, so compare within a row.
+
+| change | before → after |
+|---|---|
+| 2-CTA clusters + TMA multicast of A, not persistent (`gemm_ws_mcast.py`) | 964 → 838 |
+| persistent: 132 CTAs loop over tiles, the stage ring runs across tiles | 943 → 994 |
+| persistent + cluster + multicast (`mode="mcast"`) | 994 → 874 (slower at every panel size tried) |
+| register prefetch of the scales (`pf=4`) | 976 → 1032 |
+| 5 stages → 4 | 1013 → 1062 |
+
+A bigger tile wasn't built: with promotion each consumer needs two fp32 accumulators, 256 registers per thread at
+128 rows (cap 232).
+
+**Scale prefetch.** The producer loaded `SA[row, k]` and `SB[n, k]` and multiplied them right away. A load doesn't
+stall a thread; the first use of its result does, so every k-group paid a whole global-load latency before `full[s]`
+could flip (profile: producer 40% on that multiply, consumers waiting on `full` 22–27%). Each producer thread owns
+one row and SA is row-major, so its scales for 4 consecutive k-groups are 16 contiguous bytes: one 128-bit load,
+issued a block (4 k-groups) before use. Producer time on scales 40% → 7%, global load sectors 34.6M → 9.2M.
+`pf=8` spills under the producer's 40-register cap; loading the scales with TMA was worse per k-group, and only
+matched this with its own barrier ring.
+
+**4 stages.** Every k-step each role needs `it % S` and `(it / S) & 1`. With S = 5 that is a real integer division per
+step (68 in the generated code). With S = 4 and chunks of 4, `it % 4` is the step's position in the chunk, known at
+compile time. The consumers' address/bookkeeping time went 38% → 17%, but most of it moved into waits on `full`
+(~20% → 37%): each consumer holds 2 stages (double-buffered partials), so only ~2 k-groups of loads are in flight.
+A separate full ncu profile showed equal cycles for S=4 and S=5, so treat this gain as 0–5%.
