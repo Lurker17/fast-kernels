@@ -14,7 +14,8 @@ A (activations) has one fp32 scale per row per 128 of K (`SA[M, K/128]`), B (wei
 | `gemm_ws_tma_async_2part.py` | kernel 2: two partial accumulators per consumer, promotion overlapped with the next group's wgmmas |
 | `ab_stages_2part.py` | same-run A/B of kernels 1 and 2 at 4 and 5 stages |
 | `gemm_ws_mcast.py` | kernel 2 + 2-CTA clusters with TMA multicast of A, non-persistent (slower) |
-| `gemm_ws_persistent.py` | kernel 3 (current best): persistent, register prefetch of the scales, 4 stages; `mode` knob for cluster/multicast |
+| `gemm_ws_persistent.py` | kernels 3 and 4 (current best): persistent, register prefetch of the scales, 4 stages, TMA-store epilogue; knobs for cluster/multicast and the experiments below |
+| `probe_latency.py` | in-kernel `clock64` stamps (`dbg=True`): load latency vs pipeline lead, per k-step |
 
 ```
 python harness.py                      # correctness + benchmark of gemm_ws_tma_async
@@ -75,7 +76,7 @@ The overlap is worth ~4% of kernel time at equal stages: the second consumer war
 the promotion gap. The interleaved bench moved ~6% between runs for the same config, so use ncu time for small
 differences. Output is bitwise identical to kernel 1, so the accuracy status above is unchanged.
 
-## Kernel 3: `gemm_ws_persistent.py` (current best, ~1060 TFLOP/s)
+## Kernel 3: `gemm_ws_persistent.py` (~1060 TFLOP/s)
 
 Each row is one change; both numbers are from the same run (interleaved bench, TFLOP/s). Runs differ by up to ±6%
 on unlocked clocks, so compare within a row.
@@ -104,3 +105,57 @@ step (68 in the generated code). With S = 4 and chunks of 4, `it % 4` is the ste
 compile time. The consumers' address/bookkeeping time went 38% → 17%, but most of it moved into waits on `full`
 (~20% → 37%): each consumer holds 2 stages (double-buffered partials), so only ~2 k-groups of loads are in flight.
 A separate full ncu profile showed equal cycles for S=4 and S=5, so treat this gain as 0–5%.
+
+## Kernel 4: TMA-store epilogue (current best, 1172 TFLOP/s in the harness)
+
+Same file, `tma_epi=True` (now the default). The register epilogue (`T.copy(acc, C)`) did 64 scattered 4-byte
+global stores per thread, and the consumer warpgroup couldn't start the next tile's wgmmas until they were issued.
+Now each warpgroup converts `acc` to bf16 into its half of a swizzled 2 × 16 KB `C_s`, fences, and one thread issues
+the TMA store; the warpgroup waits for that store only before it reuses `C_s` on the next tile.
+
+| same run (interleaved bench) | TFLOP/s |
+|---|---|
+| kernel 3 (register epilogue) | 1060 |
+| **kernel 4 (TMA-store epilogue)** | **1155** (+9%) |
+
+Profile: cycles 1.564 M → 1.414 M, tensor pipe busy 67% → 75%, consumer time in the epilogue 4–8% → 1%.
+
+**Baselines, finally like-for-like.** DeepGEMM builds on an Ubuntu 24.04 / CUDA 12.9 image (it needs g++ 13).
+Harness, same run (CUDA graph, 4 rotating input sets, median):
+
+| | ms | TFLOP/s |
+|---|---|---|
+| DeepGEMM (`fp8_fp4_gemm_nt`, row-major SA as given) | 0.858 | 1281 |
+| **this kernel** | **0.938** | **1172** (91.5% of DeepGEMM) |
+| cuBLAS fp8, per-tensor scale (speed only) | 0.873 | 1260 |
+| fp8 rowwise `_scaled_mm` (speed only) | 1.020 | 1078 |
+
+**The accuracy check: it's the bound, not the kernel.** DeepGEMM fails `uniform_pos` identically: the same 117,189
+elements over the bound, the same worst element (out 2048, ref 2057.24, err/bound 1.02), and the same err/bound on the
+other two distributions. The miss comes from the fp8 wgmma's limited-precision internal accumulation on
+all-positive sums. The bound's accumulation term (2⁻¹¹·|A|·|B|) is too strict for any kernel that promotes every 128 of K.
+
+**Tried on top, no gain (all knobs in the file):**
+
+| knob | idea | result |
+|---|---|---|
+| `inc` | carry (stage, phase) across steps instead of `it % S`, `it / S`, to make 5 stages cheap | correct but slower (S=5: 998 → 973). nvcc already turns `% 5` into a cheap multiply; S=4 wins because its stage indices are compile-time constants |
+| `serp` | serpentine panel order | noise (±1%) |
+| `early` | after `wait_wgmma(1)`, read the 2 scale floats into registers, release the stage, then promote | 1155 → 1157 |
+| `mode="mcast"` | 2-CTA multicast of A, retested now that the epilogue is async | ties at panel 16 (1132 vs 1129); it used to lose 5–10% |
+
+**Why: measured, not inferred** (`probe_latency.py`). With `dbg=True` the kernel also returns `clock64` stamps per k-step:
+when the producer issued the TMA, when a consumer started waiting on `full`, and when `full` fired. Medians, cycles:
+
+| | 4 stages | 5 stages |
+|---|---|---|
+| k-step | 733 | 753 |
+| lead (consumer needs it − TMA issued) | 1252 | 2093 |
+| latency (TMA issued → `full` fires) | 1540 | 2350 |
+| consumer stall per step | **226** | **233** |
+
+One more stage issued every load 840 cycles earlier, and the data arrived at the same moment. So the consumers'
+~30% wait isn't a latency that more stages can hide. Each SM receives its 32 KB per k-step at a fixed rate (~44 B/clk;
+× 132 SMs matches ncu's L2 → SM traffic), and extra stages just queue. Multicast cuts L2 reads, but every SM still
+ingests the same 32 KB per step. The next lever is fewer bytes per FLOP per SM: a bigger CTA tile (BM = 192 with
+three consumer warpgroups, or BN = 256 with a promotion scheme that fits in 232 registers).
