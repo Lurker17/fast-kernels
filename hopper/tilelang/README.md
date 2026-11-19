@@ -37,3 +37,9 @@ gives the pipelined 516 TFLOP/s kernel. Once the pass is off, every other sync i
 
 [`fp8/`](fp8/) has the DeepSeek-V3-style fp8 GEMM (1×128 activation scales, 128×128 weight scales): problem spec,
 harness, and the kernels (best: 1172 TFLOP/s in the harness, 91.5% of DeepGEMM in the same run, with identical numerics). See [`fp8/README.md`](fp8/README.md).
+
+## Fused residual add + RMSNorm + fp8 quant
+
+[`rmsnorm_quant/`](rmsnorm_quant/) is the first memory-bound problem: the norm + per-token-group fp8 quant that feeds
+the fp8 GEMM's activations. Problem spec, harness, and a naive unfused tilelang baseline (720 µs vs a ~275 µs
+bandwidth target and torch.compile's 365 µs). See [`rmsnorm_quant/README.md`](rmsnorm_quant/README.md).
