@@ -43,3 +43,9 @@ harness, and the kernels (best: 1172 TFLOP/s in the harness, 91.5% of DeepGEMM i
 [`rmsnorm_quant/`](rmsnorm_quant/) is the first memory-bound problem: the norm + per-token-group fp8 quant that feeds
 the fp8 GEMM's activations. Problem spec, harness, and a naive unfused tilelang baseline (720 µs vs a ~275 µs
 bandwidth target and torch.compile's 365 µs). See [`rmsnorm_quant/README.md`](rmsnorm_quant/README.md).
+
+## Attention prefill (FlashAttention-style)
+
+[`FA/`](FA/) is bf16 attention prefill with GQA, causal and non-causal: problem spec, harness with FA3 / cuDNN / FA2
+baselines, and a first kernel (1 producer + 2 consumer warpgroups, hand-written TMA / mbarriers / wgmma): 448 TFLOP/s
+at causal 4 × 4096 vs FA3's 674 in the same run. See [`FA/README.md`](FA/README.md).
