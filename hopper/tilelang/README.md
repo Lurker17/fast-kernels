@@ -47,5 +47,6 @@ bandwidth target and torch.compile's 365 µs). See [`rmsnorm_quant/README.md`](r
 ## Attention prefill (FlashAttention-style)
 
 [`FA/`](FA/) is bf16 attention prefill with GQA, causal and non-causal: problem spec, harness with FA3 / cuDNN / FA2
-baselines, and a first kernel (1 producer + 2 consumer warpgroups, hand-written TMA / mbarriers / wgmma): 448 TFLOP/s
-at causal 4 × 4096 vs FA3's 674 in the same run. See [`FA/README.md`](FA/README.md).
+baselines, and three kernels (1 producer + 2 consumer warpgroups, hand-written TMA / mbarriers / wgmma; then ping-pong
+between the consumers; then a cheaper softmax). Best: 539 TFLOP/s at causal 4 × 4096 vs FA3's 643 in the same run.
+See [`FA/README.md`](FA/README.md).
